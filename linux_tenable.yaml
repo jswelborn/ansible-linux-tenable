@@ -1,0 +1,133 @@
+---
+- name: Install or remove Tenable Nessus Agent on Linux
+  hosts: all
+  become: true
+  vars_files:
+    - vars/tenable.yaml
+
+  pre_tasks:
+    - name: Validate Tenable key is provided
+      ansible.builtin.assert:
+        that:
+          - tenable_key is defined
+          - tenable_key | trim | length > 0
+        fail_msg: "tenable_key must be provided by AAP credential unless tenable_local_mode is true."
+      when:
+        - install_tenable
+        - not tenable_local_mode
+      no_log: true
+
+  tasks:
+    - name: Gather installed package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Check whether Tenable is already installed
+      ansible.builtin.set_fact:
+        tenable_installed: >-
+          {{
+            'nessusagent' in ansible_facts.packages or
+            'NessusAgent' in ansible_facts.packages or
+            'Tenable Nessus (x64)' in ansible_facts.packages or
+            'Nessus Agent (x64)' in ansible_facts.packages
+          }}
+
+    - name: Remove Tenable Nessus Agent
+      ansible.builtin.package:
+        name: "{{ 'nessusagent' if ansible_distribution == 'Ubuntu' else 'NessusAgent' }}"
+        state: absent
+      when: not install_tenable
+
+    - name: Stop play after Tenable removal
+      ansible.builtin.meta: end_play
+      when: not install_tenable
+
+    - name: Stop play on Amazon Linux
+      ansible.builtin.meta: end_play
+      when: ansible_distribution == "Amazon"
+
+    - name: Stop play on aarch64
+      ansible.builtin.meta: end_play
+      when: ansible_architecture == "aarch64"
+
+    - name: Stop play if Tenable is already installed
+      ansible.builtin.meta: end_play
+      when: tenable_installed
+
+    - name: Determine Tenable OS suffix key
+      ansible.builtin.set_fact:
+        tenable_os_suffix_key: >-
+          {%- if ansible_distribution == 'Ubuntu' -%}
+          ubuntu
+          {%- elif ansible_os_family == 'RedHat' -%}
+          rhel_{{ ansible_distribution_major_version }}
+          {%- else -%}
+          unsupported
+          {%- endif -%}
+
+    - name: Fail if unsupported platform
+      ansible.builtin.fail:
+        msg: "Unsupported platform: {{ ansible_distribution }} / {{ ansible_os_family }}"
+      when: tenable_os_suffix_key == "unsupported"
+
+    - name: Determine Tenable package suffix
+      ansible.builtin.set_fact:
+        os_package_suffix: >-
+          {%- if tenable_os_suffix_key == 'ubuntu' -%}
+          ubuntu1404_amd64.deb
+          {%- elif tenable_os_suffix_key == 'rhel_7' -%}
+          es7.x86_64.rpm
+          {%- elif tenable_os_suffix_key == 'rhel_8' -%}
+          es8.x86_64.rpm
+          {%- elif tenable_os_suffix_key == 'rhel_9' -%}
+          es8.x86_64.rpm
+          {%- else -%}
+          unsupported
+          {%- endif -%}
+
+    - name: Fail if unsupported Tenable package suffix
+      ansible.builtin.fail:
+        msg: "Unsupported Tenable package suffix for {{ tenable_os_suffix_key }}"
+      when: os_package_suffix == "unsupported"
+
+    - name: Build Tenable package filename
+      ansible.builtin.set_fact:
+        os_package_filename: "NessusAgent-{{ tenable_version }}-{{ os_package_suffix }}"
+
+    - name: Set local package path
+      ansible.builtin.set_fact:
+        os_package_local_path: "{{ tenable_linux_install_path }}/{{ os_package_filename }}"
+
+    - name: Download Tenable package
+      ansible.builtin.get_url:
+        url: "{{ tenable_package_url }}{{ os_package_filename }}"
+        dest: "{{ os_package_local_path }}"
+        mode: "0644"
+
+    - name: Install Tenable on Ubuntu
+      ansible.builtin.apt:
+        deb: "{{ os_package_local_path }}"
+        state: present
+      when: ansible_distribution == "Ubuntu"
+      notify: link tenable agent
+
+    - name: Install Tenable on RHEL
+      ansible.builtin.dnf:
+        name: "{{ os_package_local_path }}"
+        state: present
+        disable_gpg_check: true
+      when:
+        - ansible_os_family == "RedHat"
+        - ansible_distribution != "Ubuntu"
+      notify: link tenable agent
+
+  handlers:
+    - name: link tenable agent
+      ansible.builtin.command: >
+        /opt/nessus_agent/sbin/nessuscli agent link
+        --key={{ tenable_key }}
+        --groups="{{ tenable_group }}"
+        --host={{ tenable_host }}
+        --port={{ tenable_port }}
+      when: not tenable_local_mode
+      no_log: true
