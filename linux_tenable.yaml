@@ -50,10 +50,6 @@
       ansible.builtin.meta: end_play
       when: ansible_architecture == "aarch64"
 
-    - name: Stop play if Tenable is already installed
-      ansible.builtin.meta: end_play
-      when: tenable_installed
-
     - name: Determine Tenable OS suffix key
       ansible.builtin.set_fact:
         tenable_os_suffix_key: >-
@@ -103,12 +99,15 @@
         url: "{{ tenable_package_url }}{{ os_package_filename }}"
         dest: "{{ os_package_local_path }}"
         mode: "0644"
+      when: not tenable_installed
 
     - name: Install Tenable on Ubuntu
       ansible.builtin.apt:
         deb: "{{ os_package_local_path }}"
         state: present
-      when: ansible_distribution == "Ubuntu"
+      when:
+        - not tenable_installed
+        - ansible_distribution == "Ubuntu"
       notify: link tenable agent
 
     - name: Install Tenable on RHEL
@@ -117,9 +116,24 @@
         state: present
         disable_gpg_check: true
       when:
+        - not tenable_installed
         - ansible_os_family == "RedHat"
         - ansible_distribution != "Ubuntu"
       notify: link tenable agent
+
+    - name: Flush handlers before starting Nessus Agent
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Nessus Agent service is enabled and started
+      ansible.builtin.service:
+        name: nessusagent
+        state: started
+        enabled: true
+      register: nessus_service
+      retries: 3
+      delay: 10
+      until: nessus_service is succeeded
+      when: not tenable_local_mode
 
   handlers:
     - name: link tenable agent
